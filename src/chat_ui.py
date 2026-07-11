@@ -192,7 +192,7 @@ def handle_command(cmd: str, agent: AIAgent) -> bool:
 
     if cmd == "/forget":
         if Confirm.ask("[yellow]Clear all stored facts about you?[/yellow]"):
-            agent.context._write_json(agent.context.facts_file, [])
+            agent.context.clear_facts()
             console.print("[green]Facts cleared![/green]")
         return True
 
