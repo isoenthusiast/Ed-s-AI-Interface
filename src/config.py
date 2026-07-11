@@ -16,6 +16,7 @@ else:
 
 SECRETS_PATH = PROJECT_ROOT / ".secrets"
 MEMORY_DIR = PROJECT_ROOT / "memory"
+ATTACHMENTS_DIR = PROJECT_ROOT / "attached"
 
 
 def load_config() -> dict:

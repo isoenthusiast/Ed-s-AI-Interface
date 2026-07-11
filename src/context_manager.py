@@ -52,8 +52,16 @@ class ContextManager:
                 CREATE INDEX IF NOT EXISTS idx_conv_session
                     ON conversations(session_id, id);
 
+                CREATE TABLE IF NOT EXISTS projects (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name        TEXT    NOT NULL UNIQUE,
+                    created_at  TEXT    NOT NULL,
+                    updated_at  TEXT    NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS sessions (
                     session_id  TEXT    PRIMARY KEY,
+                    project_id  INTEGER DEFAULT NULL REFERENCES projects(id) ON DELETE SET NULL,
                     name        TEXT    DEFAULT NULL,
                     archived    INTEGER NOT NULL DEFAULT 0,
                     created_at  TEXT    NOT NULL,
@@ -76,11 +84,20 @@ class ContextManager:
                     timestamp   TEXT    NOT NULL DEFAULT (datetime('now'))
                 );
             """)
-            # Migrate: add `name` column if upgrading from older version
+            # Migrations for older DB versions
             try:
                 conn.execute("ALTER TABLE sessions ADD COLUMN name TEXT DEFAULT NULL")
             except sqlite3.OperationalError:
-                pass  # column already exists
+                pass
+            try:
+                conn.execute("ALTER TABLE sessions ADD COLUMN project_id INTEGER DEFAULT NULL REFERENCES projects(id) ON DELETE SET NULL")
+            except sqlite3.OperationalError:
+                pass
+            # Ensure index exists on project_id
+            try:
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id)")
+            except sqlite3.OperationalError:
+                pass
 
     # ═══════════════════════════════════════════════════════════════
     #  Migration from JSON (one-time)
@@ -213,10 +230,13 @@ class ContextManager:
                 SELECT s.session_id,
                        s.name,
                        s.archived,
+                       s.project_id,
+                       COALESCE(p.name, NULL) AS project_name,
                        COALESCE(c.cnt, 0) AS cnt,
                        s.updated_at AS last_ts,
                        c.last_msg
                 FROM sessions s
+                LEFT JOIN projects p ON p.id = s.project_id
                 LEFT JOIN (
                     SELECT session_id,
                            COUNT(*) AS cnt,
@@ -237,11 +257,14 @@ class ContextManager:
             "count": r["cnt"],
             "last_active": r["last_ts"],
             "preview": (r["last_msg"] or "")[:80],
+            "project_id": r["project_id"],
+            "project_name": r["project_name"],
         } for r in rows]
 
     def archive_session(self, session_id: str) -> bool:
         """Archive a conversation (hides it from the default view)."""
         with self._lock, self._connect() as conn:
+            self._ensure_session_meta(session_id, conn)
             cur = conn.execute(
                 "UPDATE sessions SET archived = 1, updated_at = datetime('now') WHERE session_id = ?",
                 (session_id,)
@@ -252,6 +275,7 @@ class ContextManager:
     def unarchive_session(self, session_id: str) -> bool:
         """Unarchive a conversation (restores it to the active view)."""
         with self._lock, self._connect() as conn:
+            self._ensure_session_meta(session_id, conn)
             cur = conn.execute(
                 "UPDATE sessions SET archived = 0, updated_at = datetime('now') WHERE session_id = ?",
                 (session_id,)
@@ -270,12 +294,139 @@ class ContextManager:
     def rename_session(self, session_id: str, new_name: str) -> bool:
         """Rename a conversation."""
         with self._lock, self._connect() as conn:
+            self._ensure_session_meta(session_id, conn)
             cur = conn.execute(
                 "UPDATE sessions SET name = ?, updated_at = datetime('now') WHERE session_id = ?",
                 (new_name, session_id)
             )
             conn.commit()
             return cur.rowcount > 0
+
+    # ═══════════════════════════════════════════════════════════════
+    #  Projects
+    # ═══════════════════════════════════════════════════════════════
+
+    def create_project(self, name: str) -> int | None:
+        """Create a new project. Returns the new project ID, or None if name exists."""
+        now = datetime.now().isoformat()
+        with self._lock, self._connect() as conn:
+            try:
+                cur = conn.execute(
+                    "INSERT INTO projects (name, created_at, updated_at) VALUES (?, ?, ?)",
+                    (name.strip(), now, now)
+                )
+                conn.commit()
+                return cur.lastrowid
+            except sqlite3.IntegrityError:
+                return None  # duplicate name
+
+    def delete_project(self, project_id: int) -> bool:
+        """Delete a project. All sessions in it become uncategorized (NULL project_id)."""
+        with self._lock, self._connect() as conn:
+            # Set sessions' project_id to NULL first (uncategorized)
+            conn.execute(
+                "UPDATE sessions SET project_id = NULL WHERE project_id = ?",
+                (project_id,)
+            )
+            cur = conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+            conn.commit()
+            return cur.rowcount > 0
+
+    def rename_project(self, project_id: int, new_name: str) -> bool:
+        """Rename a project."""
+        now = datetime.now().isoformat()
+        with self._lock, self._connect() as conn:
+            try:
+                cur = conn.execute(
+                    "UPDATE projects SET name = ?, updated_at = ? WHERE id = ?",
+                    (new_name.strip(), now, project_id)
+                )
+                conn.commit()
+                return cur.rowcount > 0
+            except sqlite3.IntegrityError:
+                return False  # duplicate name
+
+    def list_projects(self) -> list:
+        """List all projects with conversation counts."""
+        with self._connect() as conn:
+            rows = conn.execute("""
+                SELECT p.id, p.name, p.created_at, p.updated_at,
+                       COALESCE(s.cnt, 0) AS session_count
+                FROM projects p
+                LEFT JOIN (
+                    SELECT project_id, COUNT(*) AS cnt
+                    FROM sessions
+                    WHERE archived = 0
+                    GROUP BY project_id
+                ) s ON s.project_id = p.id
+                ORDER BY p.name ASC
+            """).fetchall()
+        return [{
+            "id": r["id"],
+            "name": r["name"],
+            "created_at": r["created_at"],
+            "updated_at": r["updated_at"],
+            "session_count": r["session_count"],
+        } for r in rows]
+
+    def assign_session_to_project(self, session_id: str, project_id: int | None) -> bool:
+        """Assign a session to a project (or None for uncategorized)."""
+        now = datetime.now().isoformat()
+        with self._lock, self._connect() as conn:
+            self._ensure_session_meta(session_id, conn)
+            cur = conn.execute(
+                "UPDATE sessions SET project_id = ?, updated_at = ? WHERE session_id = ?",
+                (project_id, now, session_id)
+            )
+            conn.commit()
+            return cur.rowcount > 0
+
+    def get_sessions_for_project(self, project_id: int | None) -> list:
+        """Get sessions for a specific project (None = uncategorized)."""
+        with self._connect() as conn:
+            if project_id is None:
+                where = "WHERE s.project_id IS NULL AND s.archived = 0"
+                params = ()
+            else:
+                where = "WHERE s.project_id = ? AND s.archived = 0"
+                params = (project_id,)
+            rows = conn.execute(f"""
+                SELECT s.session_id, s.name, s.archived, s.project_id,
+                       COALESCE(c.cnt, 0) AS cnt,
+                       s.updated_at AS last_ts,
+                       c.last_msg
+                FROM sessions s
+                LEFT JOIN (
+                    SELECT session_id, COUNT(*) AS cnt,
+                           (SELECT content FROM conversations c2
+                            WHERE c2.session_id = conversations.session_id
+                            ORDER BY c2.id DESC LIMIT 1) AS last_msg
+                    FROM conversations GROUP BY session_id
+                ) c ON c.session_id = s.session_id
+                {where}
+                ORDER BY s.updated_at DESC
+            """, params).fetchall()
+        return [{
+            "id": r["session_id"],
+            "name": r["name"],
+            "count": r["cnt"],
+            "last_active": r["last_ts"],
+            "preview": (r["last_msg"] or "")[:80],
+            "project_id": r["project_id"],
+        } for r in rows]
+
+    def get_project_for_session(self, session_id: str) -> dict | None:
+        """Get the project that a session belongs to (or None if uncategorized)."""
+        with self._connect() as conn:
+            row = conn.execute("""
+                SELECT p.id, p.name
+                FROM sessions s
+                LEFT JOIN projects p ON p.id = s.project_id
+                WHERE s.session_id = ?
+            """, (session_id,)).fetchone()
+        if row and row["id"]:
+            return {"id": row["id"], "name": row["name"]}
+        return None
 
     # ═══════════════════════════════════════════════════════════════
     #  Facts

@@ -239,3 +239,33 @@ class AIAgent:
             # Fallback if DEEPSEEK_MODELS is not set
             models = [self.config.get("model", "deepseek-chat")]
         return models
+
+    # ── Project Management ────────────────────────────────────────
+
+    def list_projects(self):
+        """List all projects."""
+        return self.context.list_projects()
+
+    def create_project(self, name: str):
+        """Create a new project."""
+        return self.context.create_project(name)
+
+    def delete_project(self, project_id: int) -> bool:
+        """Delete a project."""
+        return self.context.delete_project(project_id)
+
+    def rename_project(self, project_id: int, new_name: str) -> bool:
+        """Rename a project."""
+        return self.context.rename_project(project_id, new_name)
+
+    def assign_session_to_project(self, session_id: str, project_id: int | None) -> bool:
+        """Assign a session to a project."""
+        return self.context.assign_session_to_project(session_id, project_id)
+
+    def get_sessions_for_project(self, project_id: int | None) -> list:
+        """Get sessions for a project."""
+        return self.context.get_sessions_for_project(project_id)
+
+    def get_project_for_session(self, session_id: str) -> dict | None:
+        """Get the project for a session."""
+        return self.context.get_project_for_session(session_id)

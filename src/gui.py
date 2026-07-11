@@ -56,11 +56,11 @@ class ChatBubbleFrame(ctk.CTkFrame):
             fg_color=bubble_color,
             corner_radius=12,
         )
-        self.bubble.pack(side="right" if is_user else "left", fill="x", pady=(2, 2), padx=(60 if is_user else 4, 4 if is_user else 60))
+        self.bubble.pack(side="right" if is_user else "left", fill="x", expand=True, pady=(1, 1), padx=(16 if is_user else 4, 4 if is_user else 16))
 
         # Role label + time
         header_frame = ctk.CTkFrame(self.bubble, fg_color="transparent")
-        header_frame.pack(fill="x", padx=10, pady=(6, 0))
+        header_frame.pack(fill="x", padx=10, pady=(4, 0))
 
         role_text = "🧑 You" if is_user else "🧠 Assistant"
         ctk.CTkLabel(
@@ -81,7 +81,7 @@ class ChatBubbleFrame(ctk.CTkFrame):
 
         # ── Rich Text Content (Markdown rendered) ──────────
         content_frame = ctk.CTkFrame(self.bubble, fg_color="transparent")
-        content_frame.pack(fill="x", padx=4, pady=(2, 6))
+        content_frame.pack(fill="x", padx=8, pady=(1, 4))
 
         self.text_widget = tk.Text(
             content_frame,
@@ -93,9 +93,9 @@ class ChatBubbleFrame(ctk.CTkFrame):
             borderwidth=0,
             highlightthickness=0,
             padx=6,
-            pady=4,
-            spacing1=1,
-            spacing3=2,
+            pady=2,
+            spacing1=0,
+            spacing3=0,
             insertwidth=0,  # no cursor
             cursor="arrow",
             relief="flat",
@@ -290,7 +290,7 @@ class ConversationItem(ctk.CTkFrame):
                  is_active: bool = False, archived: bool = False,
                  name: str = None,
                  on_click=None, on_archive=None, on_unarchive=None,
-                 on_delete=None, on_rename=None, **kwargs):
+                 on_delete=None, on_rename=None, on_move=None, **kwargs):
         super().__init__(
             master,
             fg_color=self.ACTIVE_BG if is_active else COLORS["sidebar_bg"],
@@ -306,6 +306,7 @@ class ConversationItem(ctk.CTkFrame):
         self.on_unarchive = on_unarchive
         self.on_delete = on_delete
         self.on_rename = on_rename
+        self.on_move = on_move
         self._name = name
         self._preview = preview
         self.configure(corner_radius=8)
@@ -380,6 +381,7 @@ class ConversationItem(ctk.CTkFrame):
         menu.add_command(label="Open", command=lambda: self.on_click(self.session_id) if self.on_click else None)
         menu.add_separator()
         menu.add_command(label="Rename", command=lambda: self.on_rename(self.session_id, self._name) if self.on_rename else None)
+        menu.add_command(label="Move to Project...", command=lambda: self.on_move(self.session_id) if self.on_move else None)
         menu.add_separator()
         if self.archived:
             menu.add_command(label="Unarchive", command=lambda: self.on_unarchive(self.session_id) if self.on_unarchive else None)
@@ -645,6 +647,9 @@ class ChatApp(ctk.CTk):
         self.is_streaming = False
         self.stream_buffer = ""
         self.current_bubble: Optional[ChatBubbleFrame] = None
+        self.selected_project_id: Optional[int] = None  # None = show all, or project id filter
+        self.project_widgets: dict[int, ctk.CTkFrame] = {}  # track project item widgets
+        self.attached_files: list[dict] = []  # list of {filename, saved_path, content}
 
         # ── Window Setup ──────────────────────────────────────
         self.title(f"🧠 {self.agent.config['agent_name']}")
@@ -677,69 +682,114 @@ class ChatApp(ctk.CTk):
     SIDEBAR_WIDTH = 260
 
     def _build_ui(self):
-        """Build the complete UI layout."""
-        self.grid_columnconfigure(1, weight=1)
+        """Build the complete UI layout with a draggable splitter."""
         self.grid_rowconfigure(0, weight=1)
+        self.grid_columnconfigure(0, weight=1)
+
+        # ── PanedWindow (draggable divider) ────────────────
+        self.pane = tk.PanedWindow(
+            self,
+            orient="horizontal",
+            sashwidth=5,
+            sashrelief="flat",
+            bg=COLORS["border"],
+            bd=0,
+        )
+        self.pane.grid(row=0, column=0, sticky="nsew")
 
         # ── Sidebar ─────────────────────────────────────────
         self.sidebar = ctk.CTkFrame(
-            self,
+            self.pane,
             fg_color=COLORS["sidebar_bg"],
             corner_radius=0,
-            width=self.SIDEBAR_WIDTH,
         )
-        self.sidebar.grid(row=0, column=0, sticky="nsew")
-        self.sidebar.grid_propagate(False)
-        self.sidebar.grid_rowconfigure(2, weight=1)
+        self.sidebar.grid_rowconfigure(4, weight=1)  # conversation list expands
 
-        # Sidebar header
-        header = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        header.grid(row=0, column=0, sticky="ew", padx=12, pady=(14, 8))
+        # ── Row 0: Project Header ──────────────────────────
+        proj_header = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        proj_header.grid(row=0, column=0, sticky="ew", padx=12, pady=(14, 4))
 
         ctk.CTkLabel(
-            header,
-            text="💬 Conversations",
+            proj_header,
+            text="📁 Projects",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color=COLORS["text"],
+        ).pack(side="left")
+
+        # Add project button
+        self.add_project_btn = ctk.CTkButton(
+            proj_header,
+            text="+",
+            width=28,
+            height=28,
             font=ctk.CTkFont(size=16, weight="bold"),
+            fg_color=COLORS["accent"],
+            hover_color="#555555",
+            corner_radius=6,
+            command=self._show_add_project_dialog,
+        )
+        self.add_project_btn.pack(side="right")
+
+        # ── Row 1: Project List (scrollable, limited height) ──
+        self.project_list_frame = ctk.CTkScrollableFrame(
+            self.sidebar,
+            fg_color="transparent",
+            height=140,
+            scrollbar_button_color=COLORS["border"],
+            scrollbar_button_hover_color=COLORS["accent"],
+        )
+        self.project_list_frame.grid(row=1, column=0, sticky="ew", padx=6, pady=(0, 4))
+
+        # ── Row 2: Separator ───────────────────────────────
+        ctk.CTkFrame(
+            self.sidebar,
+            fg_color=COLORS["border"],
+            height=1,
+        ).grid(row=2, column=0, sticky="ew", padx=8, pady=(4, 4))
+
+        # ── Row 3: Conversations Header ────────────────────
+        conv_header = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        conv_header.grid(row=3, column=0, sticky="ew", padx=12, pady=(4, 4))
+
+        ctk.CTkLabel(
+            conv_header,
+            text="💬 Conversations",
+            font=ctk.CTkFont(size=14, weight="bold"),
             text_color=COLORS["text"],
         ).pack(side="left")
 
         # New chat button
         self.new_btn = ctk.CTkButton(
-            header,
+            conv_header,
             text="+",
-            width=32,
-            height=32,
-            font=ctk.CTkFont(size=18, weight="bold"),
+            width=28,
+            height=28,
+            font=ctk.CTkFont(size=16, weight="bold"),
             fg_color=COLORS["accent"],
             hover_color="#555555",
-            corner_radius=8,
+            corner_radius=6,
             command=self._new_conversation,
         )
         self.new_btn.pack(side="right")
 
-        # Separator
-        ctk.CTkFrame(
-            self.sidebar,
-            fg_color=COLORS["border"],
-            height=1,
-        ).grid(row=1, column=0, sticky="ew", padx=8)
-
-        # Conversation list (scrollable)
+        # ── Row 4: Conversation List (scrollable) ─────────
         self.conv_list_frame = ctk.CTkScrollableFrame(
             self.sidebar,
             fg_color="transparent",
             scrollbar_button_color=COLORS["border"],
             scrollbar_button_hover_color=COLORS["accent"],
         )
-        self.conv_list_frame.grid(row=2, column=0, sticky="nsew", padx=6, pady=4)
+        self.conv_list_frame.grid(row=4, column=0, sticky="nsew", padx=6, pady=4)
+
+        # ── Bind sidebar resize → keep scrollable frames in sync ──
+        self.sidebar.bind("<Configure>", self._on_sidebar_resize)
 
         # ── Main Chat Area ──────────────────────────────────
         self.chat_container = ctk.CTkFrame(
-            self,
+            self.pane,
             fg_color=COLORS["chat_bg"],
             corner_radius=0,
         )
-        self.chat_container.grid(row=0, column=1, sticky="nsew")
         self.chat_container.grid_rowconfigure(0, weight=1)
 
         # Chat header
@@ -815,6 +865,21 @@ class ChatApp(ctk.CTk):
         self.input_text.bind("<Shift-Return>", lambda e: None)
         self.input_text.focus()
 
+        # Attach button
+        self.attach_btn = ctk.CTkButton(
+            input_bg,
+            text="📎",
+            width=40,
+            height=36,
+            font=ctk.CTkFont(size=16),
+            fg_color=COLORS["sidebar_bg"],
+            hover_color="#d0d0d0",
+            text_color=COLORS["text"],
+            corner_radius=8,
+            command=self._attach_file,
+        )
+        self.attach_btn.pack(side="right", padx=(2, 2), pady=6)
+
         # Search toggle
         self.search_toggle = ctk.CTkCheckBox(
             input_bg,
@@ -847,6 +912,14 @@ class ChatApp(ctk.CTk):
         )
         self.send_btn.pack(side="right", padx=(4, 6), pady=6)
 
+        # ── Attachment Chips ───────────────────────────────
+        self.attach_chips_frame = ctk.CTkFrame(
+            self.chat_container,
+            fg_color="transparent",
+            height=0,
+        )
+        self.attach_chips_frame.pack(fill="x", padx=12, pady=(0, 0))
+
         # ── Status Bar ──────────────────────────────────────
         self.status_bar = ctk.CTkFrame(
             self,
@@ -854,7 +927,7 @@ class ChatApp(ctk.CTk):
             height=28,
             corner_radius=0,
         )
-        self.status_bar.grid(row=1, column=0, columnspan=2, sticky="ew")
+        self.status_bar.grid(row=1, column=0, sticky="ew")
 
         provider = self.agent.config["provider"]
         model = self.agent.config["model"]
@@ -873,20 +946,314 @@ class ChatApp(ctk.CTk):
         )
         self.status_right.pack(side="right", padx=12)
 
+        # ── Register panes in the PanedWindow ──────────────
+        self.pane.add(self.sidebar, width=self.SIDEBAR_WIDTH, minsize=self.SIDEBAR_MIN)
+        self.pane.add(self.chat_container, minsize=300)
+
+    def _on_sidebar_resize(self, event=None):
+        """Keep CTkScrollableFrame internal canvases matching the sidebar width."""
+        w = self.sidebar.winfo_width()
+        if w < 40:
+            return
+        inner_w = w - 14  # account for padx
+        for sf in (self.project_list_frame, self.conv_list_frame):
+            try:
+                # Update the canvas width so internal content fills the available space
+                sf._parent_canvas.configure(width=inner_w)
+            except Exception:
+                pass
+
+    # ═══════════════════════════════════════════════════════════
+    #  Project Management
+    # ═══════════════════════════════════════════════════════════
+
+    def _refresh_projects(self):
+        """Rebuild the project list in the project panel."""
+        for widget in self.project_list_frame.winfo_children():
+            widget.destroy()
+        self.project_widgets.clear()
+
+        projects = self.agent.list_projects()
+        uncategorized_count = sum(
+            1 for s in self.agent.context.list_sessions(include_archived=False)
+            if s.get("project_id") is None
+        )
+
+        # ── "Uncategorized" (always first) ──────────────────
+        is_selected = self.selected_project_id is None
+        uc_item = ctk.CTkFrame(
+            self.project_list_frame,
+            fg_color=COLORS["sidebar_bg"] if not is_selected else "#d0d0d0",
+            corner_radius=6,
+            cursor="hand2",
+        )
+        uc_item.pack(fill="x", pady=1)
+
+        uc_label = ctk.CTkLabel(
+            uc_item,
+            text=f"📂 Uncategorized ({uncategorized_count})",
+            font=ctk.CTkFont(size=12, weight="bold" if is_selected else "normal"),
+            text_color=COLORS["text"],
+            anchor="w",
+        )
+        uc_label.pack(side="left", fill="x", expand=True, padx=8, pady=4)
+        uc_item.bind("<Button-1>", lambda e: self._select_project(None))
+        uc_label.bind("<Button-1>", lambda e: self._select_project(None))
+
+        # ── Project items ──────────────────────────────────
+        for proj in projects:
+            is_selected = self.selected_project_id == proj["id"]
+            proj_item = ctk.CTkFrame(
+                self.project_list_frame,
+                fg_color=COLORS["sidebar_bg"] if not is_selected else "#d0d0d0",
+                corner_radius=6,
+                cursor="hand2",
+            )
+            proj_item.pack(fill="x", pady=1)
+            self.project_widgets[proj["id"]] = proj_item
+
+            proj_label = ctk.CTkLabel(
+                proj_item,
+                text=f"📁 {proj['name']} ({proj['session_count']})",
+                font=ctk.CTkFont(size=12, weight="bold" if is_selected else "normal"),
+                text_color=COLORS["text"],
+                anchor="w",
+            )
+            proj_label.pack(side="left", fill="x", expand=True, padx=8, pady=4)
+            proj_item.bind("<Button-1>", lambda e, pid=proj["id"]: self._select_project(pid))
+            proj_label.bind("<Button-1>", lambda e, pid=proj["id"]: self._select_project(pid))
+            # Right-click context menu
+            proj_item.bind("<Button-3>", lambda e, pid=proj["id"], nm=proj["name"]: self._project_context_menu(e, pid, nm))
+            proj_label.bind("<Button-3>", lambda e, pid=proj["id"], nm=proj["name"]: self._project_context_menu(e, pid, nm))
+
+    def _select_project(self, project_id: int | None):
+        """Filter conversations sidebar by the selected project."""
+        self.selected_project_id = project_id
+        self._refresh_projects()
+        self._refresh_conversations()
+
+    def _project_context_menu(self, event, project_id: int, project_name: str):
+        """Show context menu for a project (Rename / Delete)."""
+        menu = tk.Menu(self, tearoff=0, font=("Segoe UI", 10),
+                       bg="#ffffff", fg="#000000",
+                       activebackground="#dcdcdc", activeforeground="#000000")
+        menu.add_command(label="Rename", command=lambda: self._show_rename_project_dialog(project_id, project_name))
+        menu.add_separator()
+        menu.add_command(label="Delete", command=lambda: self._show_delete_project_dialog(project_id, project_name))
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _show_add_project_dialog(self):
+        """Dialog to create a new project."""
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("New Project")
+        dialog.geometry("400x180")
+        dialog.resizable(False, False)
+        dialog.transient(self)
+        dialog.grab_set()
+        x = self.winfo_x() + (self.winfo_width() - 400) // 2
+        y = self.winfo_y() + (self.winfo_height() - 180) // 2
+        dialog.geometry(f"+{x}+{y}")
+
+        ctk.CTkLabel(dialog, text="📁 Create New Project",
+                     font=ctk.CTkFont(size=16, weight="bold"),
+                     text_color=COLORS["text"]).pack(pady=(16, 8))
+
+        entry = ctk.CTkEntry(dialog, width=340, height=36, font=ctk.CTkFont(size=13),
+                             fg_color=COLORS["input_bg"], text_color=COLORS["text"],
+                             border_color=COLORS["border"], corner_radius=8,
+                             placeholder_text="Project name...")
+        entry.pack(padx=30, pady=(0, 8))
+        entry.focus()
+
+        def confirm():
+            name = entry.get().strip()
+            dialog.destroy()
+            if name:
+                pid = self.agent.create_project(name)
+                if pid is None:
+                    self._set_status(f"⚠️ Project \"{name}\" already exists", "#ff8a80")
+                else:
+                    self._set_status(f"📁 Created project \"{name}\"", COLORS["success"])
+                self._refresh_projects()
+
+        btn_frame = ctk.CTkFrame(dialog, fg_color="transparent")
+        btn_frame.pack(fill="x", padx=30, pady=(4, 12))
+        ctk.CTkButton(btn_frame, text="Cancel", fg_color="#cccccc",
+                      hover_color="#bbbbbb", text_color="#000000",
+                      width=100, command=dialog.destroy).pack(side="left", expand=True)
+        ctk.CTkButton(btn_frame, text="Create", fg_color=COLORS["accent"],
+                      hover_color="#555555", text_color="#ffffff",
+                      width=100, command=confirm).pack(side="right", expand=True)
+        entry.bind("<Return>", lambda e: confirm())
+
+    def _show_rename_project_dialog(self, project_id: int, current_name: str):
+        """Dialog to rename a project."""
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Rename Project")
+        dialog.geometry("400x180")
+        dialog.resizable(False, False)
+        dialog.transient(self)
+        dialog.grab_set()
+        x = self.winfo_x() + (self.winfo_width() - 400) // 2
+        y = self.winfo_y() + (self.winfo_height() - 180) // 2
+        dialog.geometry(f"+{x}+{y}")
+
+        ctk.CTkLabel(dialog, text="✏️ Rename Project",
+                     font=ctk.CTkFont(size=16, weight="bold"),
+                     text_color=COLORS["text"]).pack(pady=(16, 8))
+
+        entry = ctk.CTkEntry(dialog, width=340, height=36, font=ctk.CTkFont(size=13),
+                             fg_color=COLORS["input_bg"], text_color=COLORS["text"],
+                             border_color=COLORS["border"], corner_radius=8)
+        entry.insert(0, current_name)
+        entry.select_range(0, "end")
+        entry.pack(padx=30, pady=(0, 8))
+        entry.focus()
+
+        def confirm():
+            new_name = entry.get().strip()
+            dialog.destroy()
+            if new_name and new_name != current_name:
+                if self.agent.rename_project(project_id, new_name):
+                    self._set_status(f"✏️ Renamed to \"{new_name}\"", COLORS["text"])
+                    self._refresh_projects()
+                else:
+                    self._set_status(f"⚠️ Name \"{new_name}\" already taken", "#ff8a80")
+
+        btn_frame = ctk.CTkFrame(dialog, fg_color="transparent")
+        btn_frame.pack(fill="x", padx=30, pady=(4, 12))
+        ctk.CTkButton(btn_frame, text="Cancel", fg_color="#cccccc",
+                      hover_color="#bbbbbb", text_color="#000000",
+                      width=100, command=dialog.destroy).pack(side="left", expand=True)
+        ctk.CTkButton(btn_frame, text="Rename", fg_color=COLORS["accent"],
+                      hover_color="#555555", text_color="#ffffff",
+                      width=100, command=confirm).pack(side="right", expand=True)
+        entry.bind("<Return>", lambda e: confirm())
+
+    def _show_delete_project_dialog(self, project_id: int, project_name: str):
+        """Confirmation dialog before deleting a project."""
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Delete Project")
+        dialog.geometry("420x200")
+        dialog.resizable(False, False)
+        dialog.transient(self)
+        dialog.grab_set()
+        x = self.winfo_x() + (self.winfo_width() - 420) // 2
+        y = self.winfo_y() + (self.winfo_height() - 200) // 2
+        dialog.geometry(f"+{x}+{y}")
+
+        ctk.CTkLabel(dialog, text="🗑️ Delete Project",
+                     font=ctk.CTkFont(size=16, weight="bold"),
+                     text_color=COLORS["text"]).pack(pady=(16, 8))
+        ctk.CTkLabel(dialog,
+                     text=f"Delete \"{project_name}\"?\nConversations in it will become uncategorized.",
+                     font=ctk.CTkFont(size=12), text_color=COLORS["text_muted"],
+                     justify="center").pack(pady=(0, 12))
+
+        btn_frame = ctk.CTkFrame(dialog, fg_color="transparent")
+        btn_frame.pack(fill="x", padx=20, pady=(0, 12))
+        ctk.CTkButton(btn_frame, text="Cancel", fg_color="#cccccc",
+                      hover_color="#bbbbbb", text_color="#000000",
+                      width=100, command=dialog.destroy).pack(side="left", expand=True)
+        ctk.CTkButton(btn_frame, text="Delete", fg_color="#d32f2f",
+                      hover_color="#b71c1c", width=100,
+                      command=lambda: self._confirm_delete_project(project_id, project_name, dialog)
+                      ).pack(side="right", expand=True)
+
+    def _confirm_delete_project(self, project_id: int, project_name: str, dialog: ctk.CTkToplevel):
+        """Execute project deletion."""
+        dialog.destroy()
+        if self.agent.delete_project(project_id):
+            if self.selected_project_id == project_id:
+                self.selected_project_id = None
+            self._set_status(f"🗑️ Deleted project \"{project_name}\"", "#ff8a80")
+            self._refresh_projects()
+            self._refresh_conversations()
+
+    def _show_move_to_project_dialog(self, session_id: str):
+        """Dialog to move a conversation to a different project."""
+        current_project = self.agent.get_project_for_session(session_id)
+        current_pid = current_project["id"] if current_project else None
+
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Move to Project")
+        dialog.geometry("360x320")
+        dialog.resizable(False, False)
+        dialog.transient(self)
+        dialog.grab_set()
+        x = self.winfo_x() + (self.winfo_width() - 360) // 2
+        y = self.winfo_y() + (self.winfo_height() - 320) // 2
+        dialog.geometry(f"+{x}+{y}")
+
+        ctk.CTkLabel(dialog, text="📁 Move Conversation",
+                     font=ctk.CTkFont(size=15, weight="bold"),
+                     text_color=COLORS["text"]).pack(pady=(14, 8))
+
+        scroll = ctk.CTkScrollableFrame(dialog, fg_color="transparent", height=200)
+        scroll.pack(fill="both", expand=True, padx=16, pady=(0, 8))
+
+        # Uncategorized option
+        is_current = current_pid is None
+        uc_btn = ctk.CTkButton(
+            scroll, text=f"📂 Uncategorized" + (" ✅" if is_current else ""),
+            anchor="w", font=ctk.CTkFont(size=12, weight="bold" if is_current else "normal"),
+            fg_color=COLORS["accent"] if is_current else COLORS["sidebar_bg"],
+            hover_color="#d0d0d0", text_color=COLORS["text"],
+            corner_radius=6, height=30,
+            command=lambda: self._do_move_session(session_id, None, dialog),
+        )
+        uc_btn.pack(fill="x", pady=1)
+
+        # Project options
+        for proj in self.agent.list_projects():
+            is_current = current_pid == proj["id"]
+            btn = ctk.CTkButton(
+                scroll, text=f"📁 {proj['name']}" + (" ✅" if is_current else ""),
+                anchor="w", font=ctk.CTkFont(size=12, weight="bold" if is_current else "normal"),
+                fg_color=COLORS["accent"] if is_current else COLORS["sidebar_bg"],
+                hover_color="#d0d0d0", text_color=COLORS["text"],
+                corner_radius=6, height=30,
+                command=lambda pid=proj["id"]: self._do_move_session(session_id, pid, dialog),
+            )
+            btn.pack(fill="x", pady=1)
+
+    def _do_move_session(self, session_id: str, project_id: int | None, dialog: ctk.CTkToplevel):
+        """Execute the move."""
+        dialog.destroy()
+        if self.agent.assign_session_to_project(session_id, project_id):
+            label = "Uncategorized" if project_id is None else f"project {project_id}"
+            self._set_status(f"📁 Moved to {label}", COLORS["text"])
+            self._refresh_projects()
+            self._refresh_conversations()
+
     # ═══════════════════════════════════════════════════════════
     #  Conversation Management
     # ═══════════════════════════════════════════════════════════
 
     def _refresh_sidebar(self):
-        """Refresh the conversation list in the sidebar with Active/Archived sections."""
-        # Clear existing items
+        """Refresh both project list and conversation list."""
+        self._refresh_projects()
+        self._refresh_conversations()
+
+    def _refresh_conversations(self):
+        """Refresh the conversation list in the sidebar, filtered by selected project."""
         for widget in self.conv_list_frame.winfo_children():
             widget.destroy()
 
-        # Get sessions
-        active_sessions = self.agent.context.list_sessions(include_archived=False)
+        # Get sessions filtered by selected project
+        if self.selected_project_id is None:
+            active_sessions = self.agent.context.list_sessions(include_archived=False)
+        else:
+            active_sessions = self.agent.get_sessions_for_project(self.selected_project_id)
+
         all_sessions = self.agent.context.list_sessions(include_archived=True)
         archived_sessions = [s for s in all_sessions if s.get("archived", False)]
+        # Also filter archived by project
+        if self.selected_project_id is not None:
+            archived_sessions = [s for s in archived_sessions if s.get("project_id") == self.selected_project_id]
 
         # Sort by last active
         active_sessions.sort(key=lambda s: s["last_active"], reverse=True)
@@ -929,6 +1296,7 @@ class ChatApp(ctk.CTk):
                     on_archive=self._archive_session,
                     on_delete=self._show_delete_confirmation,
                     on_rename=self._rename_session,
+                    on_move=self._show_move_to_project_dialog,
                 )
                 item.pack(fill="x", pady=1)
 
@@ -964,6 +1332,7 @@ class ChatApp(ctk.CTk):
                     on_unarchive=self._unarchive_session,
                     on_delete=self._show_delete_confirmation,
                     on_rename=self._rename_session,
+                    on_move=self._show_move_to_project_dialog,
                 )
                 item.pack(fill="x", pady=1)
 
@@ -977,14 +1346,112 @@ class ChatApp(ctk.CTk):
         self._load_conversation(session_id)
 
     def _new_conversation(self):
-        """Start a new conversation."""
-        new_id = self.agent.new_session()
-        self.current_session_id = new_id
-        self.chat_title.configure(text="💬 New Conversation")
-        self._clear_chat_area()
-        self._refresh_sidebar()
-        self.input_text.focus()
-        self._set_status("✅ New conversation started", COLORS["success"])
+        """Show a dialog to name the conversation and pick a project, then create it."""
+        self._show_new_conversation_dialog()
+
+    def _show_new_conversation_dialog(self):
+        """Dialog for creating a new conversation with a title and project selection."""
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("New Conversation")
+        dialog.geometry("440x280")
+        dialog.resizable(False, False)
+        dialog.transient(self)
+        dialog.grab_set()
+        x = self.winfo_x() + (self.winfo_width() - 440) // 2
+        y = self.winfo_y() + (self.winfo_height() - 280) // 2
+        dialog.geometry(f"+{x}+{y}")
+
+        ctk.CTkLabel(dialog, text="💬 New Conversation",
+                     font=ctk.CTkFont(size=16, weight="bold"),
+                     text_color=COLORS["text"]).pack(pady=(16, 10))
+
+        # ── Title ──────────────────────────────────────────
+        ctk.CTkLabel(dialog, text="Conversation Title",
+                     font=ctk.CTkFont(size=12, weight="bold"),
+                     text_color=COLORS["text"], anchor="w").pack(fill="x", padx=30, pady=(0, 2))
+        title_entry = ctk.CTkEntry(dialog, width=380, height=34, font=ctk.CTkFont(size=13),
+                                   fg_color=COLORS["input_bg"], text_color=COLORS["text"],
+                                   border_color=COLORS["border"], corner_radius=8,
+                                   placeholder_text="Optional — leave blank for auto-name")
+        title_entry.pack(padx=30, pady=(0, 10))
+        title_entry.focus()
+
+        # ── Project Selection ──────────────────────────────
+        ctk.CTkLabel(dialog, text="Project",
+                     font=ctk.CTkFont(size=12, weight="bold"),
+                     text_color=COLORS["text"], anchor="w").pack(fill="x", padx=30, pady=(0, 2))
+
+        # Dropdown frame
+        proj_frame = ctk.CTkFrame(dialog, fg_color="transparent")
+        proj_frame.pack(fill="x", padx=30, pady=(0, 12))
+
+        projects = self.agent.list_projects()
+        project_names = ["📂 Uncategorized"] + [f"📁 {p['name']}" for p in projects]
+        project_ids = [None] + [p["id"] for p in projects]
+
+        # Pre-select current project filter
+        default_idx = 0
+        if self.selected_project_id is not None:
+            for i, pid in enumerate(project_ids):
+                if pid == self.selected_project_id:
+                    default_idx = i
+                    break
+
+        selected_var = tk.StringVar(value=project_names[default_idx])
+        dropdown = ctk.CTkOptionMenu(
+            proj_frame,
+            values=project_names,
+            variable=selected_var,
+            font=ctk.CTkFont(size=12),
+            fg_color=COLORS["input_bg"],
+            text_color=COLORS["text"],
+            button_color=COLORS["accent"],
+            button_hover_color="#555555",
+            dropdown_fg_color="#ffffff",
+            dropdown_text_color=COLORS["text"],
+            dropdown_font=ctk.CTkFont(size=12),
+            corner_radius=8,
+            height=32,
+        )
+        dropdown.pack(fill="x")
+
+        # ── Buttons ────────────────────────────────────────
+        btn_frame = ctk.CTkFrame(dialog, fg_color="transparent")
+        btn_frame.pack(fill="x", padx=30, pady=(4, 16))
+
+        ctk.CTkButton(btn_frame, text="Cancel", fg_color="#cccccc",
+                      hover_color="#bbbbbb", text_color="#000000",
+                      width=100, command=dialog.destroy).pack(side="left", expand=True)
+
+        def confirm():
+            title = title_entry.get().strip()
+            selected_name = selected_var.get()
+            dialog.destroy()
+            # Find the project id for the selected name
+            pid = None
+            for i, name in enumerate(project_names):
+                if name == selected_name:
+                    pid = project_ids[i]
+                    break
+
+            new_id = self.agent.new_session()
+            if pid is not None:
+                self.agent.assign_session_to_project(new_id, pid)
+            if title:
+                self.agent.context.rename_session(new_id, title)
+
+            self.current_session_id = new_id
+            self.chat_title.configure(text=f"💬 {title}" if title else "💬 New Conversation")
+            self._clear_chat_area()
+            self._refresh_sidebar()
+            self.input_text.focus()
+            self._set_status("✅ New conversation started", COLORS["success"])
+
+        ctk.CTkButton(btn_frame, text="Create", fg_color=COLORS["accent"],
+                      hover_color="#555555", text_color="#ffffff",
+                      width=100, command=confirm).pack(side="right", expand=True)
+
+        title_entry.bind("<Return>", lambda e: confirm())
 
     def _archive_session(self, session_id: str):
         """Archive a conversation."""
@@ -1219,22 +1686,100 @@ class ChatApp(ctk.CTk):
             self._send_message()
             return "break"
 
-    def _send_message(self):
-        """Send the current input as a message."""
-        content = self.input_text.get("1.0", "end-1c").strip()
-        if not content or self.is_streaming:
+    def _attach_file(self):
+        """Open file dialog and attach a file."""
+        from tkinter import filedialog
+        from src.attachment_handler import process_attachment
+
+        filetypes = [
+            ("All Supported", "*.pdf *.docx *.txt *.csv"),
+            ("PDF Files", "*.pdf"),
+            ("Word Documents", "*.docx"),
+            ("Text Files", "*.txt"),
+            ("CSV Files", "*.csv"),
+        ]
+        filepath = filedialog.askopenfilename(
+            title="Attach a file",
+            filetypes=filetypes,
+        )
+        if not filepath:
             return
 
-        # Clear input
+        try:
+            result = process_attachment(filepath)
+            self.attached_files.append(result)
+            self._refresh_attach_chips()
+            self._set_status(f"📎 Attached: {result['filename']}", COLORS["text"])
+        except Exception as e:
+            self._set_status(f"❌ Failed to attach: {e}", "#ff8a80")
+
+    def _remove_attachment(self, index: int):
+        """Remove an attachment at the given index."""
+        if 0 <= index < len(self.attached_files):
+            removed = self.attached_files.pop(index)
+            self._refresh_attach_chips()
+            self._set_status(f"📎 Removed: {removed['filename']}", COLORS["text_muted"])
+
+    def _refresh_attach_chips(self):
+        """Refresh the attachment chips display."""
+        for widget in self.attach_chips_frame.winfo_children():
+            widget.destroy()
+
+        if not self.attached_files:
+            return
+
+        for i, att in enumerate(self.attached_files):
+            chip = ctk.CTkFrame(
+                self.attach_chips_frame,
+                fg_color=COLORS["sidebar_bg"],
+                corner_radius=6,
+            )
+            chip.pack(side="left", padx=(0, 6), pady=2)
+
+            label_text = f"📄 {att['filename']}  ✕"
+            lbl = ctk.CTkLabel(
+                chip,
+                text=label_text,
+                font=ctk.CTkFont(size=11),
+                text_color=COLORS["text"],
+            )
+            lbl.pack(side="left", padx=8, pady=3)
+            lbl.bind("<Button-1>", lambda e, idx=i: self._remove_attachment(idx))
+            chip.bind("<Button-1>", lambda e, idx=i: self._remove_attachment(idx))
+
+    def _send_message(self):
+        """Send the current input as a message, including any attachments."""
+        content = self.input_text.get("1.0", "end-1c").strip()
+        if (not content and not self.attached_files) or self.is_streaming:
+            return
+
+        # Build the full prompt — user message + attachment content
+        full_content = content
+        if self.attached_files:
+            attachment_blocks = []
+            for att in self.attached_files:
+                attachment_blocks.append(
+                    f"[Attached file: {att['filename']}]\n\n{att['content']}"
+                )
+            attachments_text = "\n\n---\n\n".join(attachment_blocks)
+            if content:
+                full_content = f"{content}\n\n---\n\n{attachments_text}"
+            else:
+                full_content = f"Please analyze this attached file:\n\n{attachments_text}"
+
+        # Clear input and attachments
         self.input_text.delete("1.0", "end")
+        self.attached_files.clear()
+        self._refresh_attach_chips()
 
         # Handle commands
         if content.startswith("/"):
             self._handle_command(content)
             return
 
-        # Create user message
-        user_msg = ChatMessage("user", content)
+        # Create user message — display original text, send full with attachments
+        display_content = content if content else "📎 [Files attached]"
+        user_msg = ChatMessage("user", display_content)
         self._ensure_session_loaded()
         self.messages.setdefault(self.current_session_id, []).append(user_msg)
         self._display_message(user_msg)
@@ -1243,8 +1788,8 @@ class ChatApp(ctk.CTk):
         # Update sidebar with new preview
         self._refresh_sidebar()
 
-        # Start streaming AI response
-        self._start_streaming(content)
+        # Start streaming AI response with full content (including attachments)
+        self._start_streaming(full_content)
 
     def _ensure_session_loaded(self):
         """Ensure the current session has messages loaded."""

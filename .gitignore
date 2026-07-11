@@ -18,6 +18,8 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+attached/
+memory/
 *.egg
 .eggs/
 *.whl
