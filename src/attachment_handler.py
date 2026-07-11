@@ -46,6 +46,8 @@ def extract_text(filepath: str | Path) -> str:
         return _extract_pdf(path)
     elif suffix == ".docx":
         return _extract_docx(path)
+    elif suffix in (".md", ".markdown"):
+        return _extract_md(path)
     elif suffix == ".txt":
         return _extract_txt(path)
     elif suffix == ".csv":
@@ -173,6 +175,18 @@ def _extract_txt(path: Path) -> str:
         return f"## 📄 {path.name}\n\n```{lang}\n{text}\n```"
     else:
         return f"## 📄 {path.name}\n\n{text}"
+
+
+def _extract_md(path: Path) -> str:
+    """Read a Markdown file and return its content as-is."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        try:
+            text = path.read_text(encoding="latin-1")
+        except Exception as e:
+            return f"*(Failed to read Markdown: {e})*"
+    return f"## 📄 {path.name}\n\n{text}"
 
 
 def _extract_csv(path: Path) -> str:

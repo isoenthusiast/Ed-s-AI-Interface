@@ -58,6 +58,8 @@ hiddenimports = [
     "docx",
     # === duckduckgo-search ===
     "duckduckgo_search",
+    # === Drag & Drop ===
+    "tkinterdnd2",
     # === Standard library modules sometimes missed ===
     "tkinter",
     "tkinter.ttk",
@@ -90,6 +92,15 @@ try:
     theme_dir = ctk_dir / "assets" / "themes"
     if theme_dir.exists():
         datas.append((str(theme_dir), "customtkinter/assets/themes"))
+except Exception:
+    pass
+
+# Collect tkinterdnd2 native libraries for drag & drop
+try:
+    import tkinterdnd2
+    tkdnd_dir = Path(tkinterdnd2.__file__).parent / "tkdnd"
+    if tkdnd_dir.exists():
+        datas.append((str(tkdnd_dir), "tkinterdnd2/tkdnd"))
 except Exception:
     pass
 

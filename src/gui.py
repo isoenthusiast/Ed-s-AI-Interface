@@ -7,10 +7,19 @@ import tkinter as tk
 from tkinter import font as tkfont
 import threading
 import time
+import os
 from datetime import datetime
 from typing import Optional
 from src.agent import AIAgent
 from src.markdown_renderer import MarkdownRenderer
+
+# ── Drag & Drop (tkinterdnd2) ──────────────────────────────────
+try:
+    from tkinterdnd2 import DND_FILES
+    _DND_AVAILABLE = True
+except ImportError:
+    _DND_AVAILABLE = False
+    DND_FILES = None
 
 # ── Theme Configuration (Greyscale) ──────────────────────────────
 ctk.set_appearance_mode("light")
@@ -650,6 +659,11 @@ class ChatApp(ctk.CTk):
         self.selected_project_id: Optional[int] = None  # None = show all, or project id filter
         self.project_widgets: dict[int, ctk.CTkFrame] = {}  # track project item widgets
         self.attached_files: list[dict] = []  # list of {filename, saved_path, content}
+
+        # ── Enable Drag & Drop ───────────────────────────────
+        self._dnd_enabled = False
+        self._dnd_hovering = False
+        self._setup_drag_drop()
 
         # ── Window Setup ──────────────────────────────────────
         self.title(f"🧠 {self.agent.config['agent_name']}")
@@ -1812,32 +1826,152 @@ AGENT_SYSTEM_PROMPT=You are a helpful AI assistant. You are knowledgeable, frien
             self._send_message()
             return "break"
 
+    # ═══════════════════════════════════════════════════════════
+    #  Drag & Drop File Support
+    # ═══════════════════════════════════════════════════════════
+
+    def _setup_drag_drop(self):
+        """Load the tkdnd Tcl extension and register this window as a drop target."""
+        if not _DND_AVAILABLE:
+            return
+        try:
+            from tkinterdnd2.TkinterDnD import Tk as DnDTk
+
+            # Determine platform-specific tkdnd library path
+            import platform as _platform
+            system = _platform.system()
+            if system == "Windows":
+                machine = os.environ.get('PROCESSOR_ARCHITECTURE', _platform.machine())
+                if machine == "ARM64":
+                    plat = "win-arm64"
+                elif machine == "AMD64":
+                    plat = "win-x64"
+                elif machine == "x86":
+                    plat = "win-x86"
+                else:
+                    raise RuntimeError(f"Unsupported Windows architecture: {machine}")
+            else:
+                raise RuntimeError(f"Unsupported platform: {system}")
+
+            import tkinterdnd2
+            tcl_major = int(self.tk.call('info', 'tclversion').split('.')[0])
+            if tcl_major >= 9:
+                tcl9_path = os.path.join(os.path.dirname(tkinterdnd2.__file__), 'tkdnd', plat + '-tcl9')
+                module_path = tcl9_path if os.path.isdir(tcl9_path) else os.path.join(os.path.dirname(tkinterdnd2.__file__), 'tkdnd', plat)
+            else:
+                module_path = os.path.join(os.path.dirname(tkinterdnd2.__file__), 'tkdnd', plat)
+
+            self.tk.call('lappend', 'auto_path', module_path)
+            self.tk.call('package', 'require', 'tkdnd')
+
+            # Monkey-patch the DnD methods from TkinterDnD.Tk onto this ctk.CTk instance.
+            # ctk.CTk doesn't inherit from TkinterDnD.Tk, so we copy the methods over.
+            self._subst_format_str_dnd = DnDTk._subst_format_str_dnd
+            self._subst_format_dnd = DnDTk._subst_format_dnd
+            self._substitute_dnd = DnDTk._substitute_dnd.__get__(self, type(self))
+            self._dnd_bind = DnDTk._dnd_bind.__get__(self, type(self))
+            self.drop_target_register = DnDTk.drop_target_register.__get__(self, type(self))
+            self.dnd_bind = DnDTk.dnd_bind.__get__(self, type(self))
+
+            # Register this window as a file drop target
+            self.drop_target_register(DND_FILES)
+            self.dnd_bind('<<DropEnter>>', self._on_dnd_enter)
+            self.dnd_bind('<<DropLeave>>', self._on_dnd_leave)
+            self.dnd_bind('<<Drop>>', self._on_dnd_drop)
+            self.dnd_bind('<<DropPosition>>', self._on_dnd_position)
+
+            self._dnd_enabled = True
+            print("✅ Drag & drop enabled")
+        except Exception as e:
+            print(f"⚠️  Drag & drop unavailable: {e}")
+
+    def _on_dnd_enter(self, event):
+        """Visual feedback when files are dragged over the window."""
+        if not self._dnd_hovering:
+            self._dnd_hovering = True
+            # Highlight the input area with an accent border
+            try:
+                if hasattr(self, 'input_text') and self.input_text.winfo_exists():
+                    self.input_text.configure(border_width=2)
+                    self.input_text.configure(border_color=COLORS["accent"])
+            except Exception:
+                pass
+
+    def _on_dnd_leave(self, event):
+        """Reset visual feedback when drag leaves."""
+        self._dnd_hovering = False
+        try:
+            if hasattr(self, 'input_text') and self.input_text.winfo_exists():
+                self.input_text.configure(border_width=1)
+                self.input_text.configure(border_color=COLORS["border"])
+        except Exception:
+            pass
+
+    def _on_dnd_position(self, event):
+        """Accept the drag by returning the copy action."""
+        return "copy"
+
+    def _on_dnd_drop(self, event):
+        """Handle files dropped from Windows Explorer."""
+        self._on_dnd_leave(event)
+
+        if not event.data:
+            return
+
+        files = self.tk.splitlist(event.data)
+        from src.attachment_handler import process_attachment
+
+        count = 0
+        for filepath in files:
+            # Strip curly braces that tkdnd may add around paths with spaces
+            filepath = filepath.strip('{}')
+            if not os.path.isfile(filepath):
+                continue
+            try:
+                result = process_attachment(filepath)
+                self.attached_files.append(result)
+                count += 1
+            except Exception as e:
+                self._set_status(f"❌ Failed to attach {os.path.basename(filepath)}: {e}", "#ff8a80")
+
+        if count > 0:
+            self._refresh_attach_chips()
+            self._set_status(f"📎 Attached {count} file(s)", COLORS["text"])
+
+    # ═══════════════════════════════════════════════════════════
+
     def _attach_file(self):
-        """Open file dialog and attach a file."""
+        """Open file dialog and attach one or more files."""
         from tkinter import filedialog
         from src.attachment_handler import process_attachment
 
         filetypes = [
-            ("All Supported", "*.pdf *.docx *.txt *.csv"),
+            ("All Supported", "*.pdf *.docx *.txt *.csv *.md *.markdown"),
             ("PDF Files", "*.pdf"),
             ("Word Documents", "*.docx"),
+            ("Markdown Files", "*.md *.markdown"),
             ("Text Files", "*.txt"),
             ("CSV Files", "*.csv"),
         ]
-        filepath = filedialog.askopenfilename(
-            title="Attach a file",
+        filepaths = filedialog.askopenfilenames(
+            title="Attach files",
             filetypes=filetypes,
         )
-        if not filepath:
+        if not filepaths:
             return
 
-        try:
-            result = process_attachment(filepath)
-            self.attached_files.append(result)
+        count = 0
+        for filepath in filepaths:
+            try:
+                result = process_attachment(filepath)
+                self.attached_files.append(result)
+                count += 1
+            except Exception as e:
+                self._set_status(f"❌ Failed to attach {os.path.basename(filepath)}: {e}", "#ff8a80")
+
+        if count > 0:
             self._refresh_attach_chips()
-            self._set_status(f"📎 Attached: {result['filename']}", COLORS["text"])
-        except Exception as e:
-            self._set_status(f"❌ Failed to attach: {e}", "#ff8a80")
+            self._set_status(f"📎 Attached {count} file(s)", COLORS["text"])
 
     def _remove_attachment(self, index: int):
         """Remove an attachment at the given index."""

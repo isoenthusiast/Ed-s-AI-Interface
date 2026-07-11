@@ -9,6 +9,7 @@ httpx>=0.25.0          # Async HTTP (required by openai)
 # Desktop GUI
 customtkinter>=5.0.0   # Modern Windows desktop UI
 Pillow>=10.0.0         # Image support
+tkinterdnd2>=0.4.0     # Drag & drop file upload
 
 # File Attachments
 PyPDF2>=3.0.0          # PDF text extraction
