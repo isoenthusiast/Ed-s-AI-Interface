@@ -90,6 +90,28 @@ TAG_CONFIGS = {
         "spacing1": 6,
         "spacing3": 6,
     },
+    "table_header": {
+        "font_family": "Consolas",
+        "font_size": 11,
+        "font_weight": "bold",
+        "foreground": "#000000",
+        "spacing1": 2,
+        "spacing3": 0,
+    },
+    "table_cell": {
+        "font_family": "Consolas",
+        "font_size": 11,
+        "foreground": "#333333",
+        "spacing1": 1,
+        "spacing3": 0,
+    },
+    "table_border": {
+        "font_family": "Consolas",
+        "font_size": 11,
+        "foreground": "#aaaaaa",
+        "spacing1": 0,
+        "spacing3": 0,
+    },
 }
 
 # Font sizing (scaled relative to base)
@@ -162,6 +184,7 @@ class MarkdownRenderer:
     def render(self, markdown_text: str):
         """Clear the widget and render markdown content."""
         self.text.delete("1.0", "end")
+        self.tables = []  # collect table data for later scrollable rendering
         if not markdown_text.strip():
             return
         self._render_blocks(markdown_text)
@@ -210,6 +233,25 @@ class MarkdownRenderer:
                 code_block_lines.append(line)
                 i += 1
                 continue
+
+            # ── Table ────────────────────────────────────────
+            # A table starts with a header row (line with |) followed by a separator (|---|---|)
+            if line.strip().startswith("|") and i + 1 < len(lines):
+                next_line = lines[i + 1].strip()
+                if next_line.startswith("|") and re.match(r"^[\|\s\-:]+$", next_line):
+                    # Collect table rows
+                    table_lines = [line]
+                    i += 1
+                    # Separator row
+                    table_lines.append(lines[i])
+                    i += 1
+                    # Body rows
+                    while i < len(lines) and lines[i].strip().startswith("|"):
+                        table_lines.append(lines[i])
+                        i += 1
+                    self._insert_table(table_lines)
+                    in_list = False
+                    continue
 
             # ── Horizontal rule ──────────────────────────────
             if re.match(r"^[-*_]{3,}\s*$", line.strip()):
@@ -306,6 +348,75 @@ class MarkdownRenderer:
         width = 50
         self.text.insert("end", "─" * width + "\n", "hr")
         self.text.insert("end", "\n", ())
+
+    @staticmethod
+    def _clean_for_width(cell: str) -> str:
+        """Get display width by removing markdown syntax."""
+        s = cell
+        s = re.sub(r"\*\*(.+?)\*\*", r"\1", s)
+        s = re.sub(r"__(.+?)__", r"\1", s)
+        s = re.sub(r"\*(.+?)\*", r"\1", s)
+        s = re.sub(r"_(.+?)_", r"\1", s)
+        s = re.sub(r"`(.+?)`", r"\1", s)
+        s = re.sub(r"\[(.+?)\]\(.+?\)", r"\1", s)
+        return s.strip()
+
+    def _insert_table(self, table_lines: list):
+        """Store table data and insert a placeholder — scrollable widget rendered later."""
+        # Parse cells keeping raw markdown for later formatting
+        rows_raw = []
+        for line in table_lines:
+            cells = [c.strip() for c in line.strip().split("|")[1:-1]]
+            if cells:
+                rows_raw.append(cells)
+
+        if len(rows_raw) < 2:
+            return
+
+        header = rows_raw[0]
+        body = rows_raw[2:]
+
+        # Calculate widths from cleaned text
+        col_widths = [len(self._clean_for_width(h)) for h in header]
+        for row in body:
+            for j, cell in enumerate(row):
+                if j < len(col_widths):
+                    col_widths[j] = max(col_widths[j], len(self._clean_for_width(cell)))
+        col_widths = [max(w, 4) for w in col_widths]
+
+        total_width = sum(col_widths) + (len(col_widths) - 1) * 3 + 2
+
+        def _pad_cell(cell, width):
+            return self._clean_for_width(cell).ljust(width)
+
+        def _make_row(cells):
+            parts = []
+            for j, w in enumerate(col_widths):
+                cell = cells[j] if j < len(cells) else ""
+                parts.append(_pad_cell(cell, w))
+            return "│ " + " │ ".join(parts) + " │"
+
+        border = "─" * total_width
+        lines = [
+            "┌" + border[1:-1] + "┐",
+            _make_row(header),
+            "├" + border[1:-1] + "┤",
+        ]
+        for row in body:
+            lines.append(_make_row(row))
+        lines.append("└" + border[1:-1] + "┘")
+
+        self.tables.append({
+            "header_raw": header,
+            "body_raw": body,
+            "col_widths": col_widths,
+            "total_width": total_width,
+            "lines": lines,
+        })
+
+        # Placeholder marker — ChatBubbleFrame will replace with scrollable widget
+        idx = len(self.tables) - 1
+        self.text.insert("end", f"\n\n⸻ TABLE_{idx} ⸻\n\n")
 
     def _insert_heading(self, text: str, level: int):
         """Insert a heading with appropriate size."""

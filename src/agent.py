@@ -11,13 +11,14 @@ from src.context_manager import ContextManager
 
 
 class AIAgent:
-    """The AI agent that talks to the user and understands context."""
+    """The AI agent that talks to you, understands context, and searches the web."""
 
     def __init__(self):
         self.config = load_config()
         self.context = ContextManager(self.config["memory_dir"])
         self.session_id = self._generate_session_id()
         self.client: Optional[OpenAI] = None
+        self.web_search_enabled = True  # web search toggle
 
         # Initialize the API client
         self._init_client()
@@ -87,18 +88,45 @@ class AIAgent:
     # ── Chat ──────────────────────────────────────────────────────
 
     def chat(self, user_input: str) -> str:
-        """Send a message to the AI and get a response."""
-        # Learn facts from the conversation
+        """Send a message to the AI and get a response (with optional web search)."""
+        from src.web_search import search_web, format_search_results, should_search
+
         self._extract_and_store_facts(user_input)
 
-        # Build messages
-        messages = self._build_messages(user_input)
+        # Handle explicit /search command
+        processed_input = user_input
+        search_results_display = None
 
-        # Save user message to history
+        if user_input.startswith("/search "):
+            search_query = user_input[8:].strip()
+            if search_query:
+                results = search_web(search_query, max_results=5)
+                search_results_display = format_search_results(search_query, results)
+                processed_input = (
+                    f"I performed a web search for you. Here are the results:\n\n"
+                    f"{search_results_display}\n\n"
+                    f"Please provide a helpful answer based on these results "
+                    f"and your own knowledge. Cite sources where appropriate."
+                )
+        elif self.web_search_enabled and should_search(user_input):
+            results = search_web(user_input, max_results=3)
+            if results and "error" not in results[0]:
+                search_fmt = format_search_results(user_input, results)
+                processed_input = (
+                    f"The user asked: \"{user_input}\"\n\n"
+                    f"I searched the web and found these relevant results:\n\n"
+                    f"{search_fmt}\n\n"
+                    f"Please answer based on these results and your own knowledge. "
+                    f"Cite sources where helpful."
+                )
+
+        # Build messages with the (possibly augmented) input
+        messages = self._build_messages(processed_input)
+
+        # Save the original user message to history (not the augmented one)
         self.context.add_to_conversation(self.session_id, "user", user_input)
 
         try:
-            # Stream the response for a better experience
             response_text = ""
             stream = self.client.chat.completions.create(
                 model=self.config["model"],
@@ -108,13 +136,16 @@ class AIAgent:
                 stream=True,
             )
 
+            # If we did a search, yield the results first so the user sees them
+            if search_results_display and "error" not in (search_results_display or ""):
+                yield search_results_display + "\n\n---\n\n"
+
             for chunk in stream:
                 if chunk.choices and chunk.choices[0].delta.content:
                     content = chunk.choices[0].delta.content
                     response_text += content
                     yield content
 
-            # Save assistant response to history
             if response_text:
                 self.context.add_to_conversation(
                     self.session_id, "assistant", response_text
@@ -190,3 +221,21 @@ class AIAgent:
     def delete_session(self, session_id: str) -> bool:
         """Delete a session."""
         return self.context.delete_session(session_id)
+
+    # ── Model Selection ──────────────────────────────────────────
+
+    def set_model(self, model_name: str):
+        """Change the active model. The client stays connected; only the model param updates."""
+        self.config["model"] = model_name
+
+    def get_model(self) -> str:
+        """Get the currently active model name."""
+        return self.config["model"]
+
+    def get_available_models(self) -> list:
+        """Return the configurable model list from .secrets (DEEPSEEK_MODELS)."""
+        models = self.config.get("models", [])
+        if not models:
+            # Fallback if DEEPSEEK_MODELS is not set
+            models = [self.config.get("model", "deepseek-chat")]
+        return models

@@ -1,14 +1,21 @@
 """
 Configuration loader — reads from .secrets file and environment variables.
+Works both in dev mode and when packaged as a PyInstaller .exe.
 """
 
 import os
+import sys
 from pathlib import Path
 from dotenv import load_dotenv
 
-# Project root is the parent of the src/ directory
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+# When packaged as exe, use the exe's directory; otherwise use the repo root
+if getattr(sys, 'frozen', False):
+    PROJECT_ROOT = Path(sys.executable).resolve().parent
+else:
+    PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
 SECRETS_PATH = PROJECT_ROOT / ".secrets"
+MEMORY_DIR = PROJECT_ROOT / "memory"
 
 
 def load_config() -> dict:
@@ -48,12 +55,17 @@ def load_config() -> dict:
         api_base = ""
         model = ""
 
+    # ── Available models list ──────────────────────────────────────
+    models_raw = os.getenv("DEEPSEEK_MODELS", "")
+    models_list = [m.strip() for m in models_raw.split(",") if m.strip()] if models_raw else []
+
     # ── Agent Preferences ──────────────────────────────────────────
     config = {
         "provider": provider,
         "api_key": api_key,
         "api_base": api_base,
         "model": model,
+        "models": models_list,
         "agent_name": os.getenv("AGENT_NAME", "Ed's AI Assistant"),
         "temperature": float(os.getenv("AGENT_TEMPERATURE", "0.7")),
         "max_tokens": int(os.getenv("AGENT_MAX_TOKENS", "4096")),
@@ -63,7 +75,7 @@ def load_config() -> dict:
             "friendly, and context-aware. Use conversation history and stored "
             "memories to provide personalized, relevant responses.",
         ),
-        "memory_dir": PROJECT_ROOT / "memory",
+        "memory_dir": MEMORY_DIR,
     }
 
     return config

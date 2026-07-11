@@ -109,9 +109,11 @@ class ChatBubbleFrame(ctk.CTkFrame):
 
         # Markdown renderer
         self.md_renderer = MarkdownRenderer(self.text_widget, base_font_size=13)
+        self._table_widgets = []
 
-        # Render initial content and auto-size
+        # Render initial content (with table replacement if any)
         self.md_renderer.render(message.content)
+        self._replace_table_placeholders()
         self._auto_size()
 
         # Store the full content for re-rendering
@@ -130,18 +132,152 @@ class ChatBubbleFrame(ctk.CTkFrame):
     def update_content(self, text: str):
         """Update the message text (for streaming — plain text, no markdown)."""
         self._content = text
-        # During streaming, just show plain text with the renderer
-        # We use a fast path: clear and show raw text
         self.text_widget.delete("1.0", "end")
         self.text_widget.insert("1.0", text)
         self.text_widget.see("end")
+        self._clean_table_widgets()
 
     def finalize_content(self, text: str = None):
         """Re-render with full markdown formatting after streaming completes."""
         if text is not None:
             self._content = text
+        self._clean_table_widgets()
         self.md_renderer.render(self._content)
+        self._replace_table_placeholders()
         self._auto_size()
+
+    def _clean_table_widgets(self):
+        """Remove any existing table sub-widgets."""
+        for w in getattr(self, '_table_widgets', []):
+            if w.winfo_exists():
+                w.destroy()
+        self._table_widgets = []
+
+    def _replace_table_placeholders(self):
+        """Remove placeholder markers and create scrollable table widgets."""
+        tables = getattr(self.md_renderer, 'tables', [])
+        if not tables:
+            return
+
+        # Remove placeholder text lines from the main widget
+        content = self.text_widget.get("1.0", "end-1c")
+        for idx in range(len(tables)):
+            content = content.replace(f"⸻ TABLE_{idx} ⸻\n", "")
+        self.text_widget.delete("1.0", "end")
+        self.text_widget.insert("1.0", content)
+
+        # Create scrollable table widgets below the text
+        is_user = self.text_widget.cget("bg") == COLORS["user_bubble"]
+        bg = COLORS["user_bubble"] if is_user else COLORS["assistant_bubble"]
+
+        for table_data in tables:
+            tf = ctk.CTkFrame(self.bubble, fg_color=bg)
+            tf.pack(fill="x", padx=2, pady=(2, 4))
+
+            rows = len(table_data["lines"])
+            tw = tk.Text(
+                tf, wrap="none", height=rows, bg=bg, fg="#000000",
+                font=("Consolas", 11), borderwidth=1, relief="solid",
+                padx=4, pady=2, cursor="arrow", state="normal",
+            )
+
+            # Configure tags
+            tw.tag_configure("table_border", foreground="#aaaaaa")
+            tw.tag_configure("table_header", font=("Consolas", 11, "bold"), foreground="#000000")
+            tw.tag_configure("table_header_bold", font=("Consolas", 11, "bold"), foreground="#000000")
+            tw.tag_configure("table_bold", font=("Consolas", 11, "bold"), foreground="#000000")
+            tw.tag_configure("table_code", font=("Consolas", 11), foreground="#555555", background="#f0f0f0")
+
+            cw = table_data["col_widths"]
+            all_rows = [table_data.get("header_raw", [])] + table_data.get("body_raw", [])
+
+            def _insert_cell(tw, raw, width, header=False):
+                """Insert a cell with inline markdown formatting, padded to width."""
+                clean = raw
+                # Remove markdown for width calculation
+                import re as _re
+                dirty = _re.sub(r"\*\*(.+?)\*\*", r"\1", clean)
+                dirty = _re.sub(r"__(.+?)__", r"\1", dirty)
+                dirty = _re.sub(r"\*(.+?)\*", r"\1", dirty)
+                dirty = _re.sub(r"_(.+?)_", r"\1", dirty)
+                dirty = _re.sub(r"`(.+?)`", r"\1", dirty)
+                dirty = _re.sub(r"\[(.+?)\]\(.+?\)", r"\1", dirty)
+                pad = width - len(dirty.strip())
+                if pad < 0:
+                    pad = 0
+
+                # Insert with inline formatting
+                base_tag = "table_header" if header else ""
+                self._insert_table_cell(tw, raw, base_tag, pad)
+
+            # Border row
+            border = "─" * table_data["total_width"]
+            tw.insert("end", "┌" + border[1:-1] + "┐\n", "table_border")
+
+            # Header row
+            tw.insert("end", "│ ", ())
+            for j, w in enumerate(cw):
+                cell = all_rows[0][j] if j < len(all_rows[0]) else ""
+                _insert_cell(tw, cell, w, header=True)
+                if j < len(cw) - 1:
+                    tw.insert("end", " │ ", ())
+            tw.insert("end", " │\n", ())
+
+            # Separator
+            tw.insert("end", "├" + border[1:-1] + "┤\n", "table_border")
+
+            # Body rows
+            for r in range(1, len(all_rows)):
+                tw.insert("end", "│ ", ())
+                for j, w in enumerate(cw):
+                    cell = all_rows[r][j] if j < len(all_rows[r]) else ""
+                    _insert_cell(tw, cell, w, header=False)
+                    if j < len(cw) - 1:
+                        tw.insert("end", " │ ", ())
+                tw.insert("end", " │\n", ())
+
+            # Bottom border
+            tw.insert("end", "└" + border[1:-1] + "┘\n", "table_border")
+
+            tw.configure(state="disabled")
+
+            sb = ctk.CTkScrollbar(tf, orientation="horizontal", command=tw.xview,
+                                   button_color="#cccccc", button_hover_color="#aaaaaa")
+            tw.configure(xscrollcommand=sb.set)
+            tw.pack(fill="x", expand=True, side="top")
+            sb.pack(fill="x", side="bottom")
+
+            self._table_widgets.append(tf)
+
+    def _insert_table_cell(self, tw, text: str, base_tag: str, pad: int):
+        """Insert a table cell with inline bold/italic/code formatting, left-padded."""
+        import re as _re
+        if pad > 0:
+            tw.insert("end", " " * pad, base_tag if base_tag else ())
+
+        pos = 0
+        pattern = _re.compile(
+            r"\*\*(.+?)\*\*|__(.+?)__|\*(.+?)\*|_(.+?)_|`(.+?)`|\[(.+?)\]\(.+?\)"
+        )
+        while pos < len(text):
+            m = pattern.search(text, pos)
+            if not m:
+                tw.insert("end", text[pos:], base_tag if base_tag else ())
+                break
+            if m.start() > pos:
+                tw.insert("end", text[pos:m.start()], base_tag if base_tag else ())
+            if m.group(1) or m.group(2):
+                inner = m.group(1) or m.group(2)
+                tag = "table_header_bold" if base_tag == "table_header" else "table_bold"
+                tw.insert("end", inner, tag)
+            elif m.group(3) or m.group(4):
+                inner = m.group(3) or m.group(4)
+                tw.insert("end", inner, base_tag if base_tag else ())
+            elif m.group(5):
+                tw.insert("end", m.group(5), "table_code")
+            elif m.group(6):
+                tw.insert("end", m.group(6), base_tag if base_tag else ())
+            pos = m.end()
 
 
 class ConversationItem(ctk.CTkFrame):
@@ -304,6 +440,22 @@ class ChatApp(ctk.CTk):
 
         self.menu_bar.add_cascade(label="Conversation", menu=conv_menu)
 
+        # ── Model Menu ───────────────────────────────────
+        model_menu = tk.Menu(self.menu_bar, tearoff=0, font=("Segoe UI", 11),
+                             bg="#ffffff", fg="#000000",
+                             activebackground="#dcdcdc", activeforeground="#000000")
+        model_menu.add_command(label="Select Model...", command=self._show_model_selector,
+                               accelerator="Ctrl+M")
+        model_menu.add_separator()
+        # Populate known models
+        for m in self.agent.get_available_models():
+            model_menu.add_command(
+                label=m,
+                command=lambda mod=m: self._switch_model(mod),
+            )
+        self.model_menu = model_menu
+        self.menu_bar.add_cascade(label="Model", menu=model_menu)
+
         # ── File Menu ────────────────────────────────────
         file_menu = tk.Menu(self.menu_bar, tearoff=0, font=("Segoe UI", 11),
                             bg="#ffffff", fg="#000000",
@@ -319,6 +471,7 @@ class ChatApp(ctk.CTk):
         self.bind("<Control-d>", lambda e: self._menu_delete())
         self.bind("<Control-e>", lambda e: self._menu_archive())
         self.bind("<Control-r>", lambda e: self._menu_rename())
+        self.bind("<Control-m>", lambda e: self._show_model_selector())
         self.bind("<Control-q>", lambda e: self.destroy())
 
     # ── Menu Actions ─────────────────────────────────────────
@@ -355,28 +508,128 @@ class ChatApp(ctk.CTk):
         self._show_welcome()
 
     # ═══════════════════════════════════════════════════════════
-    #  Draggable Divider
+    #  Model Selection
     # ═══════════════════════════════════════════════════════════
 
-    def _divider_start(self, event):
-        """Begin dragging the sidebar divider."""
-        self._divider_dragging = True
-        self._divider_start_x = event.x_root
+    def _switch_model(self, model_name: str):
+        """Switch to a different model and update the UI."""
+        old = self.agent.get_model()
+        self.agent.set_model(model_name)
+        # Update status bar
+        provider = self.agent.config["provider"]
+        self._set_status(f"🔗 Switched to {model_name}", COLORS["text"])
+        # Update window title
+        self.title(f"🧠 {self.agent.config['agent_name']} — {model_name}")
+        # Also update the status bar provider label
+        for child in self.status_bar.winfo_children():
+            if isinstance(child, ctk.CTkLabel) and "🔗" in (child.cget("text") or ""):
+                child.configure(text=f"🔗 {provider} ({model_name})")
+                break
 
-    def _divider_drag(self, event):
-        """Drag the divider to resize the sidebar."""
-        if not self._divider_dragging:
-            return
-        dx = event.x_root - self._divider_start_x
-        self._divider_start_x = event.x_root
-        new_width = self.sidebar.winfo_width() + dx
-        new_width = max(self.SIDEBAR_MIN, min(new_width, self.winfo_width() - 300))
-        self.sidebar.configure(width=new_width)
-        self.update_idletasks()
+    def _toggle_web_search(self):
+        """Toggle web search based on checkbox state."""
+        self.agent.web_search_enabled = bool(self.search_toggle.get())
+        state = "ON" if self.agent.web_search_enabled else "OFF"
+        self._set_status(f"🌐 Web search {state}", COLORS["text"])
 
-    def _divider_stop(self, event):
-        """Stop dragging the divider."""
-        self._divider_dragging = False
+    def _show_model_selector(self):
+        """Show a dialog to select or type a model name."""
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Select Model")
+        dialog.geometry("460x320")
+        dialog.resizable(False, False)
+        dialog.transient(self)
+        dialog.grab_set()
+
+        # Center on parent
+        x = self.winfo_x() + (self.winfo_width() - 460) // 2
+        y = self.winfo_y() + (self.winfo_height() - 320) // 2
+        dialog.geometry(f"+{x}+{y}")
+
+        ctk.CTkLabel(
+            dialog,
+            text="🤖 Select Model",
+            font=ctk.CTkFont(size=16, weight="bold"),
+            text_color=COLORS["text"],
+        ).pack(pady=(16, 4))
+
+        current = self.agent.get_model()
+        ctk.CTkLabel(
+            dialog,
+            text=f"Current: {current}",
+            font=ctk.CTkFont(size=12),
+            text_color=COLORS["text_muted"],
+        ).pack(pady=(0, 8))
+
+        # Frame for model list
+        list_frame = ctk.CTkScrollableFrame(
+            dialog,
+            fg_color="transparent",
+            height=160,
+        )
+        list_frame.pack(fill="x", padx=20, pady=(0, 8))
+
+        models = self.agent.get_available_models()
+        selected_var = tk.StringVar(value=current)
+
+        for m in models:
+            is_current = m == current
+            btn = ctk.CTkButton(
+                list_frame,
+                text=f"  {m}" + ("  ✅" if is_current else ""),
+                anchor="w",
+                font=ctk.CTkFont(size=12, weight="bold" if is_current else "normal"),
+                fg_color=COLORS["accent"] if is_current else COLORS["sidebar_bg"],
+                hover_color="#d0d0d0",
+                text_color=COLORS["text"],
+                corner_radius=6,
+                height=32,
+                command=lambda mod=m: [setattr(dialog, "_selected", mod), dialog.destroy()],
+            )
+            btn.pack(fill="x", pady=1)
+
+        # Custom model entry
+        entry_frame = ctk.CTkFrame(dialog, fg_color="transparent")
+        entry_frame.pack(fill="x", padx=20, pady=(4, 12))
+
+        ctk.CTkLabel(
+            entry_frame,
+            text="Or type a custom model:",
+            font=ctk.CTkFont(size=11),
+            text_color=COLORS["text_muted"],
+        ).pack(anchor="w")
+
+        entry = ctk.CTkEntry(
+            entry_frame,
+            height=32,
+            font=ctk.CTkFont(size=12),
+            fg_color=COLORS["input_bg"],
+            text_color=COLORS["text"],
+            border_color=COLORS["border"],
+            corner_radius=6,
+        )
+        entry.pack(fill="x", pady=(2, 6))
+
+        def confirm():
+            custom = entry.get().strip()
+            if custom:
+                dialog._selected = custom
+            dialog.destroy()
+
+        ctk.CTkButton(
+            entry_frame,
+            text="Use Custom Model",
+            fg_color=COLORS["accent"],
+            hover_color="#555555",
+            text_color="#ffffff",
+            command=confirm,
+        ).pack()
+
+        # Wait for dialog and apply selection
+        self.wait_window(dialog)
+        selected = getattr(dialog, "_selected", None)
+        if selected:
+            self._switch_model(selected)
 
     # ═══════════════════════════════════════════════════════════
     #  UI Construction
@@ -421,13 +674,11 @@ class ChatApp(ctk.CTk):
         self.bind("<Control-Return>", lambda e: self._send_message())
 
     SIDEBAR_MIN = 180
-    SIDEBAR_DEFAULT = 260
+    SIDEBAR_WIDTH = 260
 
     def _build_ui(self):
         """Build the complete UI layout."""
-        self.grid_columnconfigure(0, minsize=self.SIDEBAR_MIN, weight=0)
-        self.grid_columnconfigure(1, weight=0)   # divider
-        self.grid_columnconfigure(2, weight=1)   # chat area expands
+        self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
         # ── Sidebar ─────────────────────────────────────────
@@ -435,10 +686,10 @@ class ChatApp(ctk.CTk):
             self,
             fg_color=COLORS["sidebar_bg"],
             corner_radius=0,
+            width=self.SIDEBAR_WIDTH,
         )
         self.sidebar.grid(row=0, column=0, sticky="nsew")
         self.sidebar.grid_propagate(False)
-        self.sidebar.configure(width=self.SIDEBAR_DEFAULT)
         self.sidebar.grid_rowconfigure(2, weight=1)
 
         # Sidebar header
@@ -482,29 +733,13 @@ class ChatApp(ctk.CTk):
         )
         self.conv_list_frame.grid(row=2, column=0, sticky="nsew", padx=6, pady=4)
 
-        # ── Draggable Divider ───────────────────────────────
-        self.divider = ctk.CTkFrame(
-            self,
-            fg_color=COLORS["border"],
-            width=5,
-            cursor="sb_h_double_arrow",
-            corner_radius=0,
-        )
-        self.divider.grid(row=0, column=1, sticky="ns")
-        self._divider_dragging = False
-
-        # Mouse bindings for divider
-        self.divider.bind("<Button-1>", self._divider_start)
-        self.divider.bind("<B1-Motion>", self._divider_drag)
-        self.divider.bind("<ButtonRelease-1>", self._divider_stop)
-
         # ── Main Chat Area ──────────────────────────────────
         self.chat_container = ctk.CTkFrame(
             self,
             fg_color=COLORS["chat_bg"],
             corner_radius=0,
         )
-        self.chat_container.grid(row=0, column=2, sticky="nsew")
+        self.chat_container.grid(row=0, column=1, sticky="nsew")
         self.chat_container.grid_rowconfigure(0, weight=1)
 
         # Chat header
@@ -577,8 +812,26 @@ class ChatApp(ctk.CTk):
         )
         self.input_text.pack(side="left", fill="x", expand=True, padx=(12, 4), pady=6)
         self.input_text.bind("<Return>", self._on_enter_key)
-        self.input_text.bind("<Shift-Return>", lambda e: None)  # Allow shift+enter for newline
+        self.input_text.bind("<Shift-Return>", lambda e: None)
         self.input_text.focus()
+
+        # Search toggle
+        self.search_toggle = ctk.CTkCheckBox(
+            input_bg,
+            text="🌐",
+            width=44,
+            font=ctk.CTkFont(size=14),
+            fg_color=COLORS["accent"],
+            hover_color="#555555",
+            checkbox_width=22,
+            checkbox_height=22,
+            border_width=2,
+            corner_radius=4,
+            command=self._toggle_web_search,
+        )
+        if self.agent.web_search_enabled:
+            self.search_toggle.select()
+        self.search_toggle.pack(side="right", padx=(2, 2), pady=6)
 
         # Send button
         self.send_btn = ctk.CTkButton(
@@ -601,7 +854,7 @@ class ChatApp(ctk.CTk):
             height=28,
             corner_radius=0,
         )
-        self.status_bar.grid(row=1, column=0, columnspan=3, sticky="ew")
+        self.status_bar.grid(row=1, column=0, columnspan=2, sticky="ew")
 
         provider = self.agent.config["provider"]
         model = self.agent.config["model"]
@@ -1082,6 +1335,7 @@ class ChatApp(ctk.CTk):
             help_text = (
                 "**📋 Available Commands**\n\n"
                 "• `/help` — Show this help\n"
+                "• `/search <query>` — Search the web\n"
                 "• `/new` — New conversation\n"
                 "• `/sessions` — List all sessions\n"
                 "• `/switch <id>` — Switch session\n"
@@ -1149,6 +1403,11 @@ class ChatApp(ctk.CTk):
 
         if cmd == "/exit":
             self.destroy()
+            return
+
+        # /search query — web search command, send to agent
+        if cmd.startswith("/search "):
+            self._send_as_normal_message(cmd)
             return
 
         # Unknown command — send to AI
