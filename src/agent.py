@@ -41,12 +41,17 @@ class AIAgent:
             )
             print(f"🔗 Connected to OpenAI ({cfg['model']})")
         elif cfg["provider"] == "none":
-            print("❌ No API key configured.")
-            print("   Copy .secrets.example → .secrets and add your DeepSeek API key.")
-            sys.exit(1)
+            self.client = None
+            print("⚠️  No API key configured.")
         else:
-            print(f"❌ Unknown provider: {cfg['provider']}")
-            sys.exit(1)
+            self.client = None
+            print(f"⚠️  Unknown provider: {cfg['provider']}")
+
+    def reconnect(self) -> bool:
+        """Re-read .secrets and re-initialize the API client. Returns True if connected."""
+        self.config = load_config()
+        self._init_client()
+        return self.client is not None
 
     @staticmethod
     def _generate_session_id() -> str:

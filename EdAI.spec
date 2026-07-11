@@ -129,9 +129,6 @@ a = Analysis(
     optimize=0,
 )
 
-# Clean up duplicate Tcl/Tk binaries
-a.binaries = [b for b in a.binaries if "tcl86t.dll" not in b[0].lower() and "tk86t.dll" not in b[0].lower()]
-
 # ── PYZ ──────────────────────────────────────────────────────────
 pyz = PYZ(a.pure)
 
