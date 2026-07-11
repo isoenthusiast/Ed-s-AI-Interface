@@ -1,0 +1,15 @@
+# Core
+openai>=1.0.0          # DeepSeek is OpenAI-compatible
+python-dotenv>=1.0.0   # Load .secrets file
+rich>=13.0.0           # Beautiful CLI interface
+pyperclip>=1.8.0       # Clipboard access
+requests>=2.31.0       # HTTP requests
+
+# Context & Memory
+chromadb>=0.4.0        # Vector store for long-term memory
+sentence-transformers>=2.2.0  # Embeddings
+tiktoken>=0.5.0        # Token counting
+
+# Optional
+# httpx>=0.25.0        # Async HTTP (for streaming)
+# prompt_toolkit>=3.0  # Advanced CLI input
